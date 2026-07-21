@@ -15,6 +15,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
+# Ссылка на картинку для стартового банара (замени при необходимости)
+WELCOME_IMAGE_URL = "https://images.unsplash.com/photo-1614162692292-7ac56d7f7f1e"
+
 class RegisterState(StatesGroup):
     waiting_for_pocket_id = State()
 
@@ -28,22 +31,32 @@ def get_pairs_keyboard():
         buttons.append(row)
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
+# --- Хэндлеры старта и регистрации ---
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     is_approved = await database.is_user_approved(user_id)
 
     if is_approved:
-        await message.answer(
-            "🏎️ **Добро пожаловать в SQUAD 911!**\n\n"
-            "Твой аккаунт верифицирован. Выбери валютную пару для получения сигнала:",
+        await message.answer_photo(
+            photo=WELCOME_IMAGE_URL,
+            caption=(
+                "🏎️ **ДОБРО ПОЖАЛОВАТЬ В SQUAD 911!**\n\n"
+                "📊 Твой аккаунт верифицирован.\n"
+                "Выбери валютную пару ниже, чтобы получить сигнал:"
+            ),
             reply_markup=get_pairs_keyboard(),
             parse_mode="Markdown"
         )
     else:
-        await message.answer(
-            "🤖 **SQUAD 911 | AI Signal Bot**\n\n"
-            "Для получения доступа к аналитической панели введите ваш **ID аккаунта Pocket Option** (8 цифр):",
+        await message.answer_photo(
+            photo=WELCOME_IMAGE_URL,
+            caption=(
+                "🤖 **SQUAD 911 | AI Signal Bot**\n\n"
+                "Для получения доступа к аналитической панели введите ваш **ID аккаунта Pocket Option** (8 цифр).\n\n"
+                "📌 *Чтобы заявка была принята, необходимо пополнить баланс от $15.*"
+            ),
             parse_mode="Markdown"
         )
         await state.set_state(RegisterState.waiting_for_pocket_id)
@@ -82,6 +95,8 @@ async def process_pocket_id(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
+# --- Обработка админ-действий ---
+
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve_user(callback: types.CallbackQuery):
     target_id = int(callback.data.split("_")[1])
@@ -114,6 +129,8 @@ async def reject_user(callback: types.CallbackQuery):
     except Exception:
         pass
 
+# --- Выдача сигнала и проверка результатов сделки ---
+
 @dp.message(F.text.in_(config.PAIR_MAP.keys()))
 async def send_signal(message: types.Message):
     user_id = message.from_user.id
@@ -141,6 +158,41 @@ async def send_signal(message: types.Message):
     )
 
     await msg.edit_text(signal_text, parse_mode="Markdown")
+
+    # Ждем завершения сделки (60 секунд экспирации)
+    await asyncio.sleep(60)
+
+    feedback_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 Плюс (+)", callback_data="trade_win"),
+            InlineKeyboardButton(text="🔴 Минус (-)", callback_data="trade_loss")
+        ]
+    ])
+
+    await message.answer(
+        f"⏱ **Время экспирации по {pair_name} прошло!**\n\n"
+        f"Как закрылась ваша сделка?",
+        reply_markup=feedback_keyboard,
+        parse_mode="Markdown"
+    )
+
+# --- Фидбек по результату сделки ---
+
+@dp.callback_query(F.data == "trade_win")
+async def process_win(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "🔥 **Отличный результат!** Сигнал отработал успешно.\n\n"
+        "Выбирай следующую пару и продолжай в том же духе! 🚀",
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data == "trade_loss")
+async def process_loss(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "📉 **Не переживай!** Рыночные шумы иногда случаются.\n\n"
+        "Соблюдай мани-менеджмент, перекрой сделку по следующему сигналу! 🧠",
+        parse_mode="Markdown"
+    )
 
 async def main():
     await dp.start_polling(bot)
