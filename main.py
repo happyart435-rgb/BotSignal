@@ -1,8 +1,9 @@
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 
@@ -34,9 +35,7 @@ def get_pairs_keyboard():
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
-    # При старте сразу чистим старые состояния FSM
     await state.clear()
-    
     user_id = message.from_user.id
     is_approved = await database.is_user_approved(user_id)
 
@@ -63,12 +62,18 @@ async def cmd_start(message: types.Message, state: FSMContext):
         )
         await state.set_state(RegisterState.waiting_for_pocket_id)
 
+# --- Ввод ID (Срабатывает только если юзер НЕ верифицирован) ---
+
 @dp.message(RegisterState.waiting_for_pocket_id)
 async def process_pocket_id(message: types.Message, state: FSMContext):
-    # Если пользователь ввел название пары вместо ID — игнорируем/просим ID
-    if message.text in config.PAIR_MAP.keys():
-        await message.answer("🔒 Вы еще не верифицированы. Пожалуйста, введите сначала ваш **ID Pocket Option**:")
-        return
+    user_id = message.from_user.id
+    
+    # Защита: если пользователь уже верифицирован в базе, сбрасываем состояние и передаем обработку дальше
+    if await database.is_user_approved(user_id):
+        await state.clear()
+        if message.text in config.PAIR_MAP.keys():
+            await send_signal(message, state)
+            return
 
     pocket_id = message.text.strip()
 
@@ -77,7 +82,7 @@ async def process_pocket_id(message: types.Message, state: FSMContext):
         return
 
     username = f"@{message.from_user.username}" if message.from_user.username else "Без юзернейма"
-    await database.add_or_update_user(message.from_user.id, username, pocket_id)
+    await database.add_or_update_user(user_id, username, pocket_id)
     await state.clear()
 
     await message.answer(
@@ -88,15 +93,15 @@ async def process_pocket_id(message: types.Message, state: FSMContext):
 
     admin_markup = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_{message.from_user.id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{message.from_user.id}")
+            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_{user_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{user_id}")
         ]
     ])
 
     await bot.send_message(
         chat_id=config.ADMIN_ID,
         text=f"📥 **Новая заявка на доступ!**\n\n"
-             f"👤 Пользователь: {username} (ID: `{message.from_user.id}`)\n"
+             f"👤 Пользователь: {username} (ID: `{user_id}`)\n"
              f"🆔 Pocket Option ID: `{pocket_id}`",
         reply_markup=admin_markup,
         parse_mode="Markdown"
@@ -105,14 +110,17 @@ async def process_pocket_id(message: types.Message, state: FSMContext):
 # --- Обработка решений админа ---
 
 @dp.callback_query(F.data.startswith("approve_"))
-async def approve_user(callback: types.CallbackQuery, state: FSMContext):
+async def approve_user(callback: types.CallbackQuery):
     target_id = int(callback.data.split("_")[1])
     await database.set_approve_status(target_id, True)
+
+    # Точечно очищаем FSM-состояние одобренного пользователя
+    user_key = StorageKey(bot_id=bot.id, chat_id=target_id, user_id=target_id)
+    await dp.fsm.storage.set_state(key=user_key, state=None)
 
     await callback.message.edit_text(f"{callback.message.text}\n\n✅ **ОДОБРЕНО**", parse_mode="Markdown")
 
     try:
-        # Отправляем КРАСИВОЕ single-уведомление с картинкой и клавиатурой
         await bot.send_photo(
             chat_id=target_id,
             photo=WELCOME_IMAGE_URL,
@@ -131,6 +139,9 @@ async def approve_user(callback: types.CallbackQuery, state: FSMContext):
 async def reject_user(callback: types.CallbackQuery):
     target_id = int(callback.data.split("_")[1])
     await database.set_approve_status(target_id, False)
+
+    user_key = StorageKey(bot_id=bot.id, chat_id=target_id, user_id=target_id)
+    await dp.fsm.storage.set_state(key=user_key, state=None)
 
     await callback.message.edit_text(f"{callback.message.text}\n\n❌ **ОТКЛОНЕНО**", parse_mode="Markdown")
 
@@ -151,7 +162,6 @@ async def send_signal(message: types.Message, state: FSMContext):
         await message.answer("🔒 У вас нет доступа. Введите /start для верификации.")
         return
 
-    # Очищаем любое случайное FSM-состояние при запросе сигнала
     await state.clear()
 
     pair_name = message.text
