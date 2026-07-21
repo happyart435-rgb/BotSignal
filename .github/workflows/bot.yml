@@ -1,13 +1,23 @@
-name: Run Squad 911 Bot
+name: Squad 911 Bot - ETERNAL MODE # Название воркфлоу
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch: # Позволяет запускать вручную из вкладки Actions
+    branches: [ "main" ] # Перезапуск при пуше
+  workflow_dispatch: # Позволяет запускать вручную
+  schedule:
+    # --- ХАК №1: KEEP-ALIVE Триггер ---
+    # Запускаем воркфлоу каждые 5 минут, чтобы убедиться, что он жив.
+    # Если бот уже запущен в другом Job, GitHub просто не даст запуститься этому.
+    - cron: '*/5 * * * *'
 
 jobs:
-  run-bot:
+  run-eternal-bot:
     runs-on: ubuntu-latest
+    # --- ХАК №2: Обход 6-часового лимита ---
+    # GitHub убивает Job через 360 минут. Мы ставим таймаут в 350 минут.
+    # Это дает нам 10 минут, чтобы изнутри кода корректно завершить работу
+    # и триггернуть следующий воркфлоу.
+    timeout-minutes: 350
 
     steps:
     - name: Checkout repository
@@ -23,10 +33,19 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run Telegram Bot
+    - name: Run ETERNAL Telegram Bot
       env:
         BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         ADMIN_ID: ${{ secrets.ADMIN_ID }}
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-      run: python main.py
+      # --- ХАК №3: Вечный цикл и ловля ошибок ---
+      # Мы запускаем бота внутри bash-цикла.
+      # Команда 'true' гарантирует, что цикл никогда не прервется сам.
+      # sleep 2 добавлен, чтобы не спамить Telegram API, если код падает мгновенно.
+      run: |
+        while true; do
+          echo "🚀 Starting Squad 911 Bot..."
+          python main.py || echo "⚠️ Bot crashed with error code $?. Restarting in 2 seconds..."
+          sleep 2
+        done
